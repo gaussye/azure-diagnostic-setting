@@ -31,27 +31,27 @@
 ## 用法
 
 ```bat
-add-diagnostic-setting.cmd <STORAGE_ACCOUNT> <WORKSPACE_NAME>
+add-diagnostic-setting.cmd <RESOURCE_NAME>
 ```
 
 | 参数 | 必填 | 说明 |
 | --- | --- | --- |
-| `STORAGE_ACCOUNT` | 是 | 存储账户名（全局唯一，3–24 位小写字母数字） |
-| `WORKSPACE_NAME` | 是 | Log Analytics workspace 名称 |
+| `RESOURCE_NAME` | 是 | 目标 Azure 资源名称（资源组与区域据此自动解析） |
 
-资源组与区域**根据脚本内 `RESOURCE_NAME` 对应的资源自动获取**，无需手动指定。
+存储账户名与 Log Analytics workspace 名称在**脚本头部的"可调配置"**中设置，无需作为命令行参数。
 
 ### 示例
 
 ```bat
-add-diagnostic-setting.cmd mydiagstore001 mydiag-workspace
+add-diagnostic-setting.cmd admin-3283-resource
 ```
 
 ### 可调配置（脚本头部）
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `RESOURCE_NAME` | `admin-3283-resource` | 目标资源名称 |
+| `STORAGE_ACCOUNT` | `mydiagstore001` | 存储账户名（全局唯一，3–24 位小写字母数字） |
+| `WORKSPACE_NAME` | `mydiag-workspace` | Log Analytics workspace 名称 |
 | `DIAG_NAME` | `requestresponse-diag` | 诊断设置名称 |
 | `LOG_CATEGORY` | `RequestResponse` | 采集的日志类别 |
 | `RETENTION_DAYS` | `90` | 存储中诊断日志的自动删除天数 |
