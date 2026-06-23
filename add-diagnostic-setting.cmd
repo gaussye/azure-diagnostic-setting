@@ -29,8 +29,12 @@ REM  依赖：Azure CLI (az)，并已执行 `az login`。
 REM ============================================================================
 
 REM ============================== 可调配置（按需修改） =========================
-set "STORAGE_ACCOUNT=mydiagstore001"
-set "WORKSPACE_NAME=mydiag-workspace"
+REM STORAGE_ACCOUNT 留空 = 按资源自动派生全局唯一名（diag+资源名简写+RESOURCE_ID 哈希，
+REM   同一资源重跑得到同名→幂等；不同资源自动不冲突）。如需固定名称可在此手动填写。
+set "STORAGE_ACCOUNT="
+REM WORKSPACE_NAME 留空 = 按资源自动派生独立 workspace 名（每个资源一个，便于管理，幂等）。
+REM   如需多个资源共用同一 workspace，可在此手动填写固定名称。
+set "WORKSPACE_NAME="
 set "DIAG_NAME=requestresponse-diag"
 set "LOG_CATEGORY=RequestResponse"
 set "RETENTION_DAYS=90"
@@ -51,8 +55,8 @@ echo 用法: %~nx0 ^<RESOURCE_NAME^>
 echo.
 echo   RESOURCE_NAME       (必填) 目标 Azure 资源名称（资源组与区域据此自动解析）
 echo.
-echo   （存储账户名与 workspace 名称请在脚本头部"可调配置"中设置：
-echo     STORAGE_ACCOUNT=%STORAGE_ACCOUNT%  WORKSPACE_NAME=%WORKSPACE_NAME%）
+echo   存储账户与 workspace：脚本头部留空时按资源自动派生独立名称（幂等，每个资源各一套，
+echo            便于管理）；如需固定或多资源共用，可在头部手动填写 STORAGE_ACCOUNT / WORKSPACE_NAME。
 echo.
 echo 示例: %~nx0 admin-3283-resource
 exit /b 2
@@ -101,6 +105,30 @@ echo     RESOURCE_ID    = %RESOURCE_ID%
 echo     RESOURCE_GROUP = %RESOURCE_GROUP%
 echo     LOCATION       = %LOCATION%
 
+REM 自动派生全局唯一、且与资源确定性绑定的存储账户名（STORAGE_ACCOUNT 留空时生效，幂等）
+if "%STORAGE_ACCOUNT%"=="" (
+    for /f "delims=" %%i in ('powershell -NoProfile -Command "$n=(\"%RESOURCE_NAME%\").ToLower() -replace '[^a-z0-9]',''; if($n.Length -gt 12){$n=$n.Substring(0,12)}; $h=[BitConverter]::ToString([Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes(\"%RESOURCE_ID%\"))).Replace('-','').ToLower().Substring(0,8); 'diag'+$n+$h"') do set "STORAGE_ACCOUNT=%%i"
+    if "!STORAGE_ACCOUNT!"=="" (
+        echo [ERROR] 自动生成存储账户名失败。
+        goto :fail
+    )
+    echo     STORAGE_ACCOUNT = !STORAGE_ACCOUNT! ^(自动派生 / 全局唯一^)
+) else (
+    echo     STORAGE_ACCOUNT = %STORAGE_ACCOUNT% ^(配置指定^)
+)
+
+REM 自动派生与资源确定性绑定的 workspace 名（WORKSPACE_NAME 留空时生效，每个资源独立，幂等）
+if "%WORKSPACE_NAME%"=="" (
+    for /f "delims=" %%i in ('powershell -NoProfile -Command "$n=(\"%RESOURCE_NAME%\").ToLower() -replace '[^a-z0-9-]','-'; $n=$n.Trim('-'); if($n.Length -gt 30){$n=$n.Substring(0,30).Trim('-')}; $h=[BitConverter]::ToString([Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes(\"%RESOURCE_ID%\"))).Replace('-','').ToLower().Substring(0,6); $n+'-diag-'+$h"') do set "WORKSPACE_NAME=%%i"
+    if "!WORKSPACE_NAME!"=="" (
+        echo [ERROR] 自动生成 workspace 名失败。
+        goto :fail
+    )
+    echo     WORKSPACE_NAME  = !WORKSPACE_NAME! ^(自动派生 / 每资源独立^)
+) else (
+    echo     WORKSPACE_NAME  = %WORKSPACE_NAME% ^(配置指定^)
+)
+
 REM --------------------------------------------------------------------------
 echo.
 echo === [2/5] 检查 Storage Account 是否存在（不存在则创建，禁用 Shared Key） ===
@@ -116,10 +144,7 @@ if errorlevel 1 (
         --min-tls-version TLS1_2 ^
         --allow-blob-public-access false ^
         --allow-shared-key-access false 1>nul
-    if errorlevel 1 (
-        echo [ERROR] 创建 Storage Account 失败。
-        exit /b 1
-    )
+    if errorlevel 1 goto :fail_storage
     echo     已创建（Shared Key 已禁用）。
 ) else (
     echo     已存在。检查 Shared Key 是否已禁用 ...
@@ -130,7 +155,7 @@ if errorlevel 1 (
         call az storage account update --name "%STORAGE_ACCOUNT%" --resource-group "%RESOURCE_GROUP%" --allow-shared-key-access false 1>nul
         if errorlevel 1 (
             echo [ERROR] 禁用 Shared Key 失败。
-            exit /b 1
+            goto :fail
         )
         echo     已禁用 Shared Key。
     ) else (
@@ -187,28 +212,33 @@ echo     已配置: insights-logs-* 容器中的 blob，修改 %RETENTION_DAYS% 
 
 REM --------------------------------------------------------------------------
 echo.
-echo === [3/5] 检查 Log Analytics workspace 是否存在（不存在则创建） ===
-call az monitor log-analytics workspace show --resource-group "%RESOURCE_GROUP%" --workspace-name "%WORKSPACE_NAME%" >nul 2>&1
-if errorlevel 1 (
-    echo     不存在，正在创建 workspace: %WORKSPACE_NAME% ...
+echo === [3/5] 解析 / 复用 / 创建 Log Analytics workspace: %WORKSPACE_NAME% ===
+set "WORKSPACE_ID="
+set "WS_COUNT=0"
+for /f "delims=" %%i in ('az monitor log-analytics workspace list --query "length([?name=='%WORKSPACE_NAME%'])" -o tsv 2^>nul') do set "WS_COUNT=%%i"
+if "%WS_COUNT%"=="0" (
+    echo     订阅中不存在，正在 %RESOURCE_GROUP% / %LOCATION% 创建 ...
     call az monitor log-analytics workspace create ^
         --resource-group "%RESOURCE_GROUP%" ^
         --workspace-name "%WORKSPACE_NAME%" ^
         --location "%LOCATION%" 1>nul
     if errorlevel 1 (
         echo [ERROR] 创建 Log Analytics workspace 失败。
-        exit /b 1
+        goto :fail
     )
+    for /f "delims=" %%i in ('az monitor log-analytics workspace show --resource-group "%RESOURCE_GROUP%" --workspace-name "%WORKSPACE_NAME%" --query id -o tsv') do set "WORKSPACE_ID=%%i"
     echo     已创建。
+) else if "%WS_COUNT%"=="1" (
+    for /f "delims=" %%i in ('az monitor log-analytics workspace list --query "[?name=='%WORKSPACE_NAME%'].id | [0]" -o tsv 2^>nul') do set "WORKSPACE_ID=%%i"
+    echo     已存在，复用现有 workspace（重跑幂等；如手动指定为共享名，则多资源共用）。
 ) else (
-    echo     已存在，跳过创建。
+    echo [ERROR] 订阅中发现 %WS_COUNT% 个同名 workspace "%WORKSPACE_NAME%"，无法确定目标。
+    az monitor log-analytics workspace list --query "[?name=='%WORKSPACE_NAME%'].{name:name, resourceGroup:resourceGroup, location:location}" -o table
+    goto :fail
 )
-
-set "WORKSPACE_ID="
-for /f "delims=" %%i in ('az monitor log-analytics workspace show --resource-group "%RESOURCE_GROUP%" --workspace-name "%WORKSPACE_NAME%" --query id -o tsv') do set "WORKSPACE_ID=%%i"
 if "%WORKSPACE_ID%"=="" (
     echo [ERROR] 无法获取 Log Analytics workspace ID。
-    exit /b 1
+    goto :fail
 )
 echo     WORKSPACE_ID = %WORKSPACE_ID%
 
@@ -249,3 +279,13 @@ echo === 完成: 已为 %RESOURCE_NAME% 配置 Diagnostic Setting ===
 echo     %LOG_CATEGORY% -^> Storage: %STORAGE_ACCOUNT%（Shared Key 禁用, %RETENTION_DAYS% 天后删除） + Log Analytics: %WORKSPACE_NAME%
 endlocal
 exit /b 0
+
+:fail_storage
+echo [ERROR] 创建 Storage Account 失败。
+echo         存储账户名全局唯一，且诊断归档要求存储账户与资源 "%RESOURCE_NAME%" 在同一区域（%LOCATION%）。
+echo         请在脚本头部把 STORAGE_ACCOUNT 改为一个未被占用、且位于 %LOCATION% 的新名称后重试。
+goto :fail
+
+:fail
+endlocal
+exit /b 1
