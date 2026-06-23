@@ -125,6 +125,53 @@ add-diagnostic-setting.cmd mydiagstore001 mydiag-workspace
 
 ---
 
+## 验证部署与查询数据
+
+脚本运行成功后（最后一步输出 `=== 完成: 已为 ... 配置 Diagnostic Setting ===`，退出码 0），可用以下两种方式确认配置并查询日志数据。
+
+### 1. 用 Azure CLI 验证配置
+
+```bat
+:: 确认诊断设置已创建（仅 RequestResponse 启用，输出到 storage + workspace）
+az monitor diagnostic-settings show --name requestresponse-diag --resource <RESOURCE_ID>
+
+:: 确认存储账户已生成诊断日志容器
+az storage container list --account-name mydiagstore001 --auth-mode login --query "[].name" -o tsv
+```
+
+![CLI 验证诊断设置](assets/verify-diagnostic-setting.png)
+
+### 2. 查询 Log Analytics workspace 数据（KQL）
+
+数据从产生到可查询通常有 **几分钟**延迟。在 workspace 里运行 KQL：
+
+```kusto
+AzureDiagnostics
+| where Category == "RequestResponse"
+| summarize Count=count() by OperationName, ResultType
+| sort by Count desc
+```
+
+![CLI 查询 workspace 数据](assets/query-workspace-data.png)
+
+### 3. 在 Azure 门户检查配置
+
+打开资源 → **监视 / Monitoring** → **诊断设置 / Diagnostic settings**，可看到 `requestresponse-diag` 同时指向存储账户与 Log Analytics workspace：
+
+![门户：诊断设置列表](assets/portal-diagnostics-list.png)
+
+点击 **Edit setting** 查看明细：仅勾选 **Request and Response Logs**，目标为 **Log Analytics workspace（mydiag-workspace）** + **Archive to a storage account（mydiagstore001）**：
+
+![门户：诊断设置配置详情](assets/portal-edit-blade.png)
+
+### 4. 在门户里查询 workspace 数据
+
+资源 / workspace → **日志 / Logs**，运行上面的 KQL，可看到 `RequestResponse` 记录已写入：
+
+![门户：Logs 查询结果](assets/portal-logs-results.png)
+
+---
+
 ## License
 
 MIT
