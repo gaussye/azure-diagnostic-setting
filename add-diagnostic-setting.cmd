@@ -1,6 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
 
+REM 本脚本以 UTF-8 (无 BOM) 保存。切换控制台代码页为 UTF-8 (65001)，
+REM 确保中文注释与输出在任意区域设置(如英文/GBK)的 Windows PC 上都能正确显示与解析，
+REM 避免因代码页不匹配导致多行 az ^ 命令被错误解析而报错。
+chcp 65001 >nul
+
 REM ============================================================================
 REM  add-diagnostic-setting.cmd
 REM
