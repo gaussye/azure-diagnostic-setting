@@ -4,45 +4,58 @@ setlocal enabledelayedexpansion
 REM ============================================================================
 REM  add-diagnostic-setting.cmd
 REM
-REM  给指定 Azure 资源添加 Diagnostic Setting（仅 RequestResponse 日志，不做 archive retention）。
-REM  两个目标:
-REM    (1) Storage Account（归档，禁用 Shared Key，仅 Entra ID 鉴权）
+REM  Add a Diagnostic Setting to an Azure resource (RequestResponse logs only,
+REM  no archive retention on the setting itself). Two destinations:
+REM    (1) Storage Account (archive; Shared Key disabled, Entra ID auth only)
 REM    (2) Log Analytics workspace
-REM  存储账户/工作区都会先检查是否存在，不存在则新建。
-REM  存储账户会配置生命周期规则，诊断日志（insights-logs-* 容器）在修改 RETENTION_DAYS 天后自动删除。
-REM  资源组(RESOURCE_GROUP)与区域(LOCATION)根据资源名称自动获取。
-REM  幂等：可重复执行。
+REM  Both the storage account and the workspace are checked first and created
+REM  if missing. The storage account gets a lifecycle rule so diagnostic logs
+REM  (insights-logs-* containers) are auto-deleted after RETENTION_DAYS days.
+REM  Resource group (RESOURCE_GROUP) and region (LOCATION) are resolved
+REM  automatically from the resource name. Idempotent: safe to re-run.
 REM
-REM  说明: 诊断设置写入存储账户由 Azure 平台的受信任 Microsoft 服务完成，
-REM        不需要在存储账户 IAM 上为 Azure Monitor 配置任何 RBAC 角色，禁用 Shared Key 也照常工作。
-REM        （已通过真实环境 mcaps8d59a29a335d797a 验证：shared key 禁用、无 Monitor 角色，归档仍正常。）
+REM  Note: writing diagnostic logs to the storage account is performed by
+REM        trusted Microsoft services on the Azure platform, so no RBAC role
+REM        for Azure Monitor is required on the storage account IAM and
+REM        archiving still works with Shared Key disabled.
 REM
-REM  用法:
+REM  IMPORTANT: This file is intentionally ASCII-only (English). cmd.exe cannot
+REM        reliably parse batch files that contain non-ASCII (e.g. Chinese)
+REM        text - UTF-8 misaligns multi-byte sequences and GBK trailing bytes
+REM        collide with special characters (\ | < > ^ &), both of which make
+REM        the parser eat characters. Keeping this script ASCII-only lets it
+REM        run correctly on any Windows locale / code page.
+REM
+REM  Usage:
 REM    add-diagnostic-setting.cmd <RESOURCE_NAME>
 REM
-REM  参数:
-REM    RESOURCE_NAME       (必填) 目标 Azure 资源名称（资源组与区域据此自动解析）
+REM  Parameters:
+REM    RESOURCE_NAME       (required) Target Azure resource name
+REM                        (resource group and region are auto-resolved)
 REM
-REM  存储账户名与 Log Analytics workspace 名称在脚本头部"可调配置"中设置。
+REM  Set the storage account and Log Analytics workspace names in the
+REM  "Configurable settings" block at the top of this script.
 REM
-REM  依赖：Azure CLI (az)，并已执行 `az login`。
+REM  Requires: Azure CLI (az) and a prior `az login`.
 REM ============================================================================
 
-REM ============================== 可调配置（按需修改） =========================
-REM STORAGE_ACCOUNT 留空 = 按资源自动派生全局唯一名（diag+资源名简写+RESOURCE_ID 哈希，
-REM   同一资源重跑得到同名→幂等；不同资源自动不冲突）。如需固定名称可在此手动填写。
+REM ============================== Configurable settings =======================
+REM STORAGE_ACCOUNT empty = auto-derive a globally-unique name (diag + short
+REM   resource name + hash of RESOURCE_ID). Same resource -> same name (idempotent);
+REM   different resources never collide. Set a fixed name here if you prefer.
 set "STORAGE_ACCOUNT="
-REM WORKSPACE_NAME 留空 = 按资源自动派生独立 workspace 名（每个资源一个，便于管理，幂等）。
-REM   如需多个资源共用同一 workspace，可在此手动填写固定名称。
+REM WORKSPACE_NAME empty = auto-derive a dedicated workspace name (one per
+REM   resource, easy to manage, idempotent). Set a fixed name here to share one
+REM   workspace across multiple resources.
 set "WORKSPACE_NAME="
 set "DIAG_NAME=requestresponse-diag"
 set "LOG_CATEGORY=RequestResponse"
 set "RETENTION_DAYS=90"
 REM ============================================================================
 
-REM ============================== 命令行参数 ==================================
+REM ============================== Command-line arguments ======================
 set "RESOURCE_NAME=%~1"
-REM RESOURCE_GROUP 与 LOCATION 由步骤 [1] 根据资源名称自动解析
+REM RESOURCE_GROUP and LOCATION are resolved in step [1] from the resource name
 set "RESOURCE_GROUP="
 set "LOCATION="
 
@@ -51,90 +64,94 @@ goto :start
 
 :usage
 echo.
-echo 用法: %~nx0 ^<RESOURCE_NAME^>
+echo Usage: %~nx0 ^<RESOURCE_NAME^>
 echo.
-echo   RESOURCE_NAME       (必填) 目标 Azure 资源名称（资源组与区域据此自动解析）
+echo   RESOURCE_NAME       (required) Target Azure resource name
+echo                       (resource group and region are auto-resolved)
 echo.
-echo   存储账户与 workspace：脚本头部留空时按资源自动派生独立名称（幂等，每个资源各一套，
-echo            便于管理）；如需固定或多资源共用，可在头部手动填写 STORAGE_ACCOUNT / WORKSPACE_NAME。
+echo   Storage account / workspace: when left empty in the header block, names
+echo            are auto-derived per resource (idempotent, one set each). Set a
+echo            fixed / shared name via STORAGE_ACCOUNT / WORKSPACE_NAME.
 echo.
-echo 示例: %~nx0 admin-3283-resource
+echo Example: %~nx0 admin-3283-resource
 exit /b 2
 
 :start
 echo.
-echo === [0/5] 检查 Azure CLI 登录状态 ===
+echo === [0/5] Checking Azure CLI login state ===
 call az account show >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] 未登录 Azure，请先执行: az login
+    echo [ERROR] Not logged in to Azure. Run: az login
     exit /b 1
 )
 
 REM --------------------------------------------------------------------------
 echo.
-echo === [1/5] 根据资源名称解析 ID / 资源组 / 区域: %RESOURCE_NAME% ===
+echo === [1/5] Resolving ID / resource group / region for: %RESOURCE_NAME% ===
 set "RESOURCE_COUNT=0"
 for /f "delims=" %%i in ('az resource list --name "%RESOURCE_NAME%" --query "length(@)" -o tsv 2^>nul') do set "RESOURCE_COUNT=%%i"
 if "%RESOURCE_COUNT%"=="0" (
-    echo [ERROR] 找不到资源 %RESOURCE_NAME%，请确认名称及当前订阅。
+    echo [ERROR] Resource %RESOURCE_NAME% not found. Check the name and current subscription.
     exit /b 1
 )
 if not "%RESOURCE_COUNT%"=="1" (
-    echo [ERROR] 发现 %RESOURCE_COUNT% 个同名资源 "%RESOURCE_NAME%"，无法确定目标。
-    echo         请改用完整 Resource ID，或在订阅中消除重名。匹配到的资源如下：
+    echo [ERROR] Found %RESOURCE_COUNT% resources named "%RESOURCE_NAME%"; target is ambiguous.
+    echo         Use the full Resource ID, or remove the name collision. Matches:
     az resource list --name "%RESOURCE_NAME%" --query "[].{name:name, type:type, resourceGroup:resourceGroup, location:location}" -o table
     exit /b 1
 )
 set "RESOURCE_ID="
 for /f "delims=" %%i in ('az resource list --name "%RESOURCE_NAME%" --query "[0].id" -o tsv 2^>nul') do set "RESOURCE_ID=%%i"
 if "%RESOURCE_ID%"=="" (
-    echo [ERROR] 无法解析资源 ID。
+    echo [ERROR] Could not resolve the resource ID.
     exit /b 1
 )
 for /f "delims=" %%i in ('az resource list --name "%RESOURCE_NAME%" --query "[0].resourceGroup" -o tsv 2^>nul') do set "RESOURCE_GROUP=%%i"
 for /f "delims=" %%i in ('az resource list --name "%RESOURCE_NAME%" --query "[0].location" -o tsv 2^>nul') do set "LOCATION=%%i"
 if "%RESOURCE_GROUP%"=="" (
-    echo [ERROR] 无法解析资源所属的资源组。
+    echo [ERROR] Could not resolve the resource group.
     exit /b 1
 )
 if "%LOCATION%"=="" (
-    echo [ERROR] 无法解析资源所属的区域。
+    echo [ERROR] Could not resolve the resource region.
     exit /b 1
 )
 echo     RESOURCE_ID    = %RESOURCE_ID%
 echo     RESOURCE_GROUP = %RESOURCE_GROUP%
 echo     LOCATION       = %LOCATION%
 
-REM 自动派生全局唯一、且与资源确定性绑定的存储账户名（STORAGE_ACCOUNT 留空时生效，幂等）
+REM Auto-derive a globally-unique storage account name bound to the resource
+REM (used when STORAGE_ACCOUNT is empty; idempotent).
 if "%STORAGE_ACCOUNT%"=="" (
     for /f "delims=" %%i in ('powershell -NoProfile -Command "$n=(\"%RESOURCE_NAME%\").ToLower() -replace '[^a-z0-9]',''; if($n.Length -gt 12){$n=$n.Substring(0,12)}; $h=[BitConverter]::ToString([Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes(\"%RESOURCE_ID%\"))).Replace('-','').ToLower().Substring(0,8); 'diag'+$n+$h"') do set "STORAGE_ACCOUNT=%%i"
     if "!STORAGE_ACCOUNT!"=="" (
-        echo [ERROR] 自动生成存储账户名失败。
+        echo [ERROR] Failed to auto-generate a storage account name.
         goto :fail
     )
-    echo     STORAGE_ACCOUNT = !STORAGE_ACCOUNT! ^(自动派生 / 全局唯一^)
+    echo     STORAGE_ACCOUNT = !STORAGE_ACCOUNT! ^(auto-derived / globally unique^)
 ) else (
-    echo     STORAGE_ACCOUNT = %STORAGE_ACCOUNT% ^(配置指定^)
+    echo     STORAGE_ACCOUNT = %STORAGE_ACCOUNT% ^(from config^)
 )
 
-REM 自动派生与资源确定性绑定的 workspace 名（WORKSPACE_NAME 留空时生效，每个资源独立，幂等）
+REM Auto-derive a workspace name bound to the resource (used when WORKSPACE_NAME
+REM is empty; one per resource, idempotent).
 if "%WORKSPACE_NAME%"=="" (
     for /f "delims=" %%i in ('powershell -NoProfile -Command "$n=(\"%RESOURCE_NAME%\").ToLower() -replace '[^a-z0-9-]','-'; $n=$n.Trim('-'); if($n.Length -gt 30){$n=$n.Substring(0,30).Trim('-')}; $h=[BitConverter]::ToString([Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes(\"%RESOURCE_ID%\"))).Replace('-','').ToLower().Substring(0,6); $n+'-diag-'+$h"') do set "WORKSPACE_NAME=%%i"
     if "!WORKSPACE_NAME!"=="" (
-        echo [ERROR] 自动生成 workspace 名失败。
+        echo [ERROR] Failed to auto-generate a workspace name.
         goto :fail
     )
-    echo     WORKSPACE_NAME  = !WORKSPACE_NAME! ^(自动派生 / 每资源独立^)
+    echo     WORKSPACE_NAME  = !WORKSPACE_NAME! ^(auto-derived / per resource^)
 ) else (
-    echo     WORKSPACE_NAME  = %WORKSPACE_NAME% ^(配置指定^)
+    echo     WORKSPACE_NAME  = %WORKSPACE_NAME% ^(from config^)
 )
 
 REM --------------------------------------------------------------------------
 echo.
-echo === [2/5] 检查 Storage Account 是否存在（不存在则创建，禁用 Shared Key） ===
+echo === [2/5] Ensuring Storage Account exists (create if missing, Shared Key disabled) ===
 call az storage account show --name "%STORAGE_ACCOUNT%" --resource-group "%RESOURCE_GROUP%" >nul 2>&1
 if errorlevel 1 (
-    echo     不存在，正在创建 Storage Account: %STORAGE_ACCOUNT% ...
+    echo     Not found. Creating Storage Account: %STORAGE_ACCOUNT% ...
     call az storage account create ^
         --name "%STORAGE_ACCOUNT%" ^
         --resource-group "%RESOURCE_GROUP%" ^
@@ -145,35 +162,35 @@ if errorlevel 1 (
         --allow-blob-public-access false ^
         --allow-shared-key-access false 1>nul
     if errorlevel 1 goto :fail_storage
-    echo     已创建（Shared Key 已禁用）。
+    echo     Created (Shared Key disabled).
 ) else (
-    echo     已存在。检查 Shared Key 是否已禁用 ...
+    echo     Exists. Checking whether Shared Key is disabled ...
     set "SHARED_KEY_ENABLED="
     for /f "delims=" %%i in ('az storage account show --name "%STORAGE_ACCOUNT%" --resource-group "%RESOURCE_GROUP%" --query "allowSharedKeyAccess" -o tsv') do set "SHARED_KEY_ENABLED=%%i"
     if /i "!SHARED_KEY_ENABLED!"=="true" (
-        echo     当前允许 Shared Key，正在禁用 ...
+        echo     Shared Key currently allowed; disabling ...
         call az storage account update --name "%STORAGE_ACCOUNT%" --resource-group "%RESOURCE_GROUP%" --allow-shared-key-access false 1>nul
         if errorlevel 1 (
-            echo [ERROR] 禁用 Shared Key 失败。
+            echo [ERROR] Failed to disable Shared Key.
             goto :fail
         )
-        echo     已禁用 Shared Key。
+        echo     Shared Key disabled.
     ) else (
-        echo     Shared Key 已是禁用状态。
+        echo     Shared Key already disabled.
     )
 )
 
 set "STORAGE_ID="
 for /f "delims=" %%i in ('az storage account show --name "%STORAGE_ACCOUNT%" --resource-group "%RESOURCE_GROUP%" --query id -o tsv') do set "STORAGE_ID=%%i"
 if "%STORAGE_ID%"=="" (
-    echo [ERROR] 无法获取 Storage Account ID。
+    echo [ERROR] Could not get the Storage Account ID.
     exit /b 1
 )
 echo     STORAGE_ID = %STORAGE_ID%
 
 REM --------------------------------------------------------------------------
 echo.
-echo === [2b/5] 配置存储账户生命周期规则（诊断日志 %RETENTION_DAYS% 天后删除） ===
+echo === [2b/5] Configuring storage lifecycle rule (delete diagnostic logs after %RETENTION_DAYS% days) ===
 set "POLICY_FILE=%TEMP%\lifecycle-policy-%RANDOM%.json"
 (
 echo {
@@ -203,48 +220,48 @@ call az storage account management-policy create ^
     --resource-group "%RESOURCE_GROUP%" ^
     --policy @"%POLICY_FILE%" 1>nul
 if errorlevel 1 (
-    echo [ERROR] 配置生命周期规则失败。
+    echo [ERROR] Failed to configure the lifecycle rule.
     del "%POLICY_FILE%" >nul 2>&1
     exit /b 1
 )
 del "%POLICY_FILE%" >nul 2>&1
-echo     已配置: insights-logs-* 容器中的 blob，修改 %RETENTION_DAYS% 天后自动删除。
+echo     Configured: blobs in insights-logs-* containers auto-delete %RETENTION_DAYS% days after modification.
 
 REM --------------------------------------------------------------------------
 echo.
-echo === [3/5] 解析 / 复用 / 创建 Log Analytics workspace: %WORKSPACE_NAME% ===
+echo === [3/5] Resolve / reuse / create Log Analytics workspace: %WORKSPACE_NAME% ===
 set "WORKSPACE_ID="
 set "WS_COUNT=0"
 for /f "delims=" %%i in ('az monitor log-analytics workspace list --query "length([?name=='%WORKSPACE_NAME%'])" -o tsv 2^>nul') do set "WS_COUNT=%%i"
 if "%WS_COUNT%"=="0" (
-    echo     订阅中不存在，正在 %RESOURCE_GROUP% / %LOCATION% 创建 ...
+    echo     Not present in subscription; creating in %RESOURCE_GROUP% / %LOCATION% ...
     call az monitor log-analytics workspace create ^
         --resource-group "%RESOURCE_GROUP%" ^
         --workspace-name "%WORKSPACE_NAME%" ^
         --location "%LOCATION%" 1>nul
     if errorlevel 1 (
-        echo [ERROR] 创建 Log Analytics workspace 失败。
+        echo [ERROR] Failed to create the Log Analytics workspace.
         goto :fail
     )
     for /f "delims=" %%i in ('az monitor log-analytics workspace show --resource-group "%RESOURCE_GROUP%" --workspace-name "%WORKSPACE_NAME%" --query id -o tsv') do set "WORKSPACE_ID=%%i"
-    echo     已创建。
+    echo     Created.
 ) else if "%WS_COUNT%"=="1" (
     for /f "delims=" %%i in ('az monitor log-analytics workspace list --query "[?name=='%WORKSPACE_NAME%'].id | [0]" -o tsv 2^>nul') do set "WORKSPACE_ID=%%i"
-    echo     已存在，复用现有 workspace（重跑幂等；如手动指定为共享名，则多资源共用）。
+    echo     Exists; reusing (idempotent; or shared across resources if a fixed name was set).
 ) else (
-    echo [ERROR] 订阅中发现 %WS_COUNT% 个同名 workspace "%WORKSPACE_NAME%"，无法确定目标。
+    echo [ERROR] Found %WS_COUNT% workspaces named "%WORKSPACE_NAME%"; target is ambiguous.
     az monitor log-analytics workspace list --query "[?name=='%WORKSPACE_NAME%'].{name:name, resourceGroup:resourceGroup, location:location}" -o table
     goto :fail
 )
 if "%WORKSPACE_ID%"=="" (
-    echo [ERROR] 无法获取 Log Analytics workspace ID。
+    echo [ERROR] Could not get the Log Analytics workspace ID.
     goto :fail
 )
 echo     WORKSPACE_ID = %WORKSPACE_ID%
 
 REM --------------------------------------------------------------------------
 echo.
-echo === [4/5] 生成诊断设置日志配置（仅 %LOG_CATEGORY%，不带 retention/archive） ===
+echo === [4/5] Building diagnostic-setting log config (only %LOG_CATEGORY%, no retention/archive) ===
 set "LOGS_FILE=%TEMP%\diag-logs-%RANDOM%.json"
 > "%LOGS_FILE%" echo [{ "category": "%LOG_CATEGORY%", "enabled": true }]
 echo     LOGS_FILE = %LOGS_FILE%
@@ -252,12 +269,12 @@ type "%LOGS_FILE%"
 
 REM --------------------------------------------------------------------------
 echo.
-echo === [5/5] 创建/更新 Diagnostic Setting: %DIAG_NAME% ===
+echo === [5/5] Creating/updating Diagnostic Setting: %DIAG_NAME% ===
 call az monitor diagnostic-settings show --name "%DIAG_NAME%" --resource "%RESOURCE_ID%" >nul 2>&1
 if errorlevel 1 (
-    echo     不存在，正在创建 ...
+    echo     Not present; creating ...
 ) else (
-    echo     已存在，将更新（重新创建）...
+    echo     Exists; updating (recreate) ...
     call az monitor diagnostic-settings delete --name "%DIAG_NAME%" --resource "%RESOURCE_ID%" 1>nul 2>&1
 )
 
@@ -268,22 +285,24 @@ call az monitor diagnostic-settings create ^
     --workspace "%WORKSPACE_ID%" ^
     --logs @"%LOGS_FILE%" 1>nul
 if errorlevel 1 (
-    echo [ERROR] 创建 Diagnostic Setting 失败。请确认资源类型支持 "%LOG_CATEGORY%" 日志类别。
+    echo [ERROR] Failed to create the Diagnostic Setting. Confirm the resource type supports "%LOG_CATEGORY%" logs.
     del "%LOGS_FILE%" >nul 2>&1
     exit /b 1
 )
 
 del "%LOGS_FILE%" >nul 2>&1
 echo.
-echo === 完成: 已为 %RESOURCE_NAME% 配置 Diagnostic Setting ===
-echo     %LOG_CATEGORY% -^> Storage: %STORAGE_ACCOUNT%（Shared Key 禁用, %RETENTION_DAYS% 天后删除） + Log Analytics: %WORKSPACE_NAME%
+echo === Done: Diagnostic Setting configured for %RESOURCE_NAME% ===
+echo     %LOG_CATEGORY% -^> Storage: %STORAGE_ACCOUNT% (Shared Key disabled, delete after %RETENTION_DAYS% days) + Log Analytics: %WORKSPACE_NAME%
 endlocal
 exit /b 0
 
 :fail_storage
-echo [ERROR] 创建 Storage Account 失败。
-echo         存储账户名全局唯一，且诊断归档要求存储账户与资源 "%RESOURCE_NAME%" 在同一区域（%LOCATION%）。
-echo         请在脚本头部把 STORAGE_ACCOUNT 改为一个未被占用、且位于 %LOCATION% 的新名称后重试。
+echo [ERROR] Failed to create the Storage Account.
+echo         The storage account name is globally unique and diagnostic archiving
+echo         requires the storage account to be in the same region as resource
+echo         "%RESOURCE_NAME%" (%LOCATION%). Set STORAGE_ACCOUNT in the header to an
+echo         unused name in %LOCATION% and retry.
 goto :fail
 
 :fail
