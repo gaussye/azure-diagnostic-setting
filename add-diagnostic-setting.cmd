@@ -87,6 +87,17 @@ if errorlevel 1 (
 
 REM --------------------------------------------------------------------------
 echo.
+echo === [0b/5] Ensuring required resource providers are registered ===
+REM Log Analytics needs Microsoft.OperationalInsights, diagnostic settings need
+REM Microsoft.Insights, and the storage account needs Microsoft.Storage. If a
+REM provider is not registered, creating the workspace fails with errors like
+REM "Resource provider 'Microsoft.OperationalInsights' ... is not registered".
+call :ensure_provider Microsoft.Storage
+call :ensure_provider Microsoft.OperationalInsights
+call :ensure_provider Microsoft.Insights
+
+REM --------------------------------------------------------------------------
+echo.
 echo === [1/5] Resolving ID / resource group / region for: %RESOURCE_NAME% ===
 set "RESOURCE_COUNT=0"
 for /f "delims=" %%i in ('az resource list --name "%RESOURCE_NAME%" --query "length(@)" -o tsv 2^>nul') do set "RESOURCE_COUNT=%%i"
@@ -296,6 +307,38 @@ echo === Done: Diagnostic Setting configured for %RESOURCE_NAME% ===
 echo     %LOG_CATEGORY% -^> Storage: %STORAGE_ACCOUNT% ^(Shared Key disabled, delete after %RETENTION_DAYS% days^) + Log Analytics: %WORKSPACE_NAME%
 endlocal
 exit /b 0
+
+REM ============================================================================
+REM  Subroutine: ensure a resource provider is registered.
+REM    %1 = provider namespace (e.g. Microsoft.OperationalInsights)
+REM  Registers the provider if needed and waits (up to ~150s) until Registered.
+REM ============================================================================
+:ensure_provider
+set "_PROV=%~1"
+set "_STATE="
+for /f "delims=" %%i in ('az provider show --namespace "%_PROV%" --query registrationState -o tsv 2^>nul') do set "_STATE=%%i"
+if /i "!_STATE!"=="Registered" (
+    echo     %_PROV% : Registered
+    goto :eof
+)
+echo     %_PROV% : !_STATE! -^> registering, please wait ...
+call az provider register --namespace "%_PROV%" 1>nul 2>&1
+set /a _TRIES=0
+:ensure_provider_wait
+set "_STATE="
+for /f "delims=" %%i in ('az provider show --namespace "%_PROV%" --query registrationState -o tsv 2^>nul') do set "_STATE=%%i"
+if /i "!_STATE!"=="Registered" (
+    echo     %_PROV% : Registered
+    goto :eof
+)
+set /a _TRIES+=1
+if !_TRIES! geq 30 (
+    echo [WARN] %_PROV% still "!_STATE!" after waiting; continuing anyway.
+    goto :eof
+)
+REM portable ~5s sleep ^(ping avoids timeout's stdin-redirection issues^)
+ping -n 6 127.0.0.1 >nul 2>&1
+goto :ensure_provider_wait
 
 :fail_storage
 echo [ERROR] Failed to create the Storage Account.
