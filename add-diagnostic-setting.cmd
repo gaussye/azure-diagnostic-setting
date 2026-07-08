@@ -162,7 +162,7 @@ if errorlevel 1 (
         --allow-blob-public-access false ^
         --allow-shared-key-access false 1>nul
     if errorlevel 1 goto :fail_storage
-    echo     Created (Shared Key disabled).
+    echo     Created ^(Shared Key disabled^).
 ) else (
     echo     Exists. Checking whether Shared Key is disabled ...
     set "SHARED_KEY_ENABLED="
@@ -247,7 +247,7 @@ if "%WS_COUNT%"=="0" (
     echo     Created.
 ) else if "%WS_COUNT%"=="1" (
     for /f "delims=" %%i in ('az monitor log-analytics workspace list --query "[?name=='%WORKSPACE_NAME%'].id | [0]" -o tsv 2^>nul') do set "WORKSPACE_ID=%%i"
-    echo     Exists; reusing (idempotent; or shared across resources if a fixed name was set).
+    echo     Exists; reusing ^(idempotent; or shared across resources if a fixed name was set^).
 ) else (
     echo [ERROR] Found %WS_COUNT% workspaces named "%WORKSPACE_NAME%"; target is ambiguous.
     az monitor log-analytics workspace list --query "[?name=='%WORKSPACE_NAME%'].{name:name, resourceGroup:resourceGroup, location:location}" -o table
@@ -274,7 +274,7 @@ call az monitor diagnostic-settings show --name "%DIAG_NAME%" --resource "%RESOU
 if errorlevel 1 (
     echo     Not present; creating ...
 ) else (
-    echo     Exists; updating (recreate) ...
+    echo     Exists; updating ^(recreate^) ...
     call az monitor diagnostic-settings delete --name "%DIAG_NAME%" --resource "%RESOURCE_ID%" 1>nul 2>&1
 )
 
@@ -293,7 +293,7 @@ if errorlevel 1 (
 del "%LOGS_FILE%" >nul 2>&1
 echo.
 echo === Done: Diagnostic Setting configured for %RESOURCE_NAME% ===
-echo     %LOG_CATEGORY% -^> Storage: %STORAGE_ACCOUNT% (Shared Key disabled, delete after %RETENTION_DAYS% days) + Log Analytics: %WORKSPACE_NAME%
+echo     %LOG_CATEGORY% -^> Storage: %STORAGE_ACCOUNT% ^(Shared Key disabled, delete after %RETENTION_DAYS% days^) + Log Analytics: %WORKSPACE_NAME%
 endlocal
 exit /b 0
 
@@ -301,7 +301,7 @@ exit /b 0
 echo [ERROR] Failed to create the Storage Account.
 echo         The storage account name is globally unique and diagnostic archiving
 echo         requires the storage account to be in the same region as resource
-echo         "%RESOURCE_NAME%" (%LOCATION%). Set STORAGE_ACCOUNT in the header to an
+echo         "%RESOURCE_NAME%" ^(%LOCATION%^). Set STORAGE_ACCOUNT in the header to an
 echo         unused name in %LOCATION% and retry.
 goto :fail
 
